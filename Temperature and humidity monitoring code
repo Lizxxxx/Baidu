@@ -1,0 +1,175 @@
+-- 温湿度上报+状态反控  
+  
+local config = {  
+      WIFI_SSID = "", --wifi名称  
+      WIFI_PASSWD = "" --wifi密码  
+  
+}  
+  
+local data = {  
+      – 按格式上报数据
+      DATA= string.format("{\"%s\":{\"%s\":%s}}", -- 当led灯打开时
+            "reported","led","true"),  
+      DATA1= string.format("{\"%s\":{\"%s\":%s}}", -- 当led灯关闭时
+            "reported","led","false"),  
+      DATA2="" -- 用来存储温湿度数据  
+}  
+  
+local pin = 4 --控制LED灯的GPIO接口的IO index  
+  
+function startup() -- wifi连接成功后开始运行的start function  
+      
+      print("Running")  
+      tmr.create():alarm(30000, tmr.ALARM_AUTO, toCloud)  
+end  
+  
+function toCloud() -- MQTT连接物联网平台并传输数据的function  
+  
+   print("checking updates...")  
+  
+   MqttUserString = "xxxx" --在创建物影子时保存的用户名name  
+   MqttPwdString = "xxxx" --在创建物影子时保存的密码key  
+   MqttIPString = "xxxx" --在创建物影子时保存的address (TCP/SSL/WSS按需选择)  
+   MqttPort = xxxx -- MqttIPString里选择的address对应的port  
+   clientID = "indoor_test" -- 物影子名称  
+  
+   -- 创建一个新的MQTT用户  
+   local m = mqtt.Client(clientID, 1000, MqttUserString, MqttPwdString)   
+  
+   m:on("connect", function(client) print ("connected") end) --设置连接成功时会弹出的信息  
+   m:on("offline", function(client) print ("offline") end) --设置连接失败时会弹出的信息  
+     
+   m:connect(MqttIPString, MqttPort, 0, function(client) -- 开始连接  
+        
+   --连接成功时会执行以下代码  
+      print("connected")  
+      
+      -- 订阅以下topic 当云端平台输入对led开关的期望值时，topic会返回更新引导led灯做出反应  
+      client:subscribe("$baidu/iot/shadow/indoor_test/delta", 0, function(client)   
+        print("subscribe success")   
+      end)  
+      readdata() -- 收集当前的温湿度数据  
+      -- 将当前的温湿度数据上报到云端平台  
+      client:publish("$baidu/iot/shadow/indoor_test/update",   
+           data.DATA2, 0, 0, function(client) print("sent temp/hum") end)  
+        
+      client:on("message", function(client, topic, message)  
+      -- 当云端平台的led开关期望值有更新时，执行以下操作  
+             
+            --处理返回的数据，拿到更新的期望值(true（开）or false (关))  
+            edited_message =string.sub(message,2,-3)  
+            list_table = split(edited_message,":")  
+            maxSize = table.maxn(list_table)  
+              
+            tag = list_table[maxSize]  
+           
+            --当期望值=true，执行led开灯操作并向云端平台发送信息更新led灯状态  
+            if tag == "true" then  
+               print("turn the led on")  
+               gpio.mode(pin, gpio.OUTPUT)  
+               gpio.write(pin, gpio.LOW)  
+               client:publish("$baidu/iot/shadow/indoor_test/update", data.DATA,  
+                0, 0, function(client) print("sent") end)  
+            --当期望值=false，执行led关灯操作并向云端平台发送信息更新led灯状态  
+            else  
+               print("turn the led off")  
+               gpio.mode(pin, gpio.OUTPUT)  
+               gpio.write(pin, gpio.HIGH)  
+               client:publish("$baidu/iot/shadow/indoor_test/update", data.DATA1,  
+                0, 0, function(client) print("sent") end)  
+            end  
+      end)  
+   end,  
+   --连接失败时会执行以下代码  
+   function(client, reason)  
+      print("failed reason: " .. reason)  
+   end)  
+end  
+  
+function split(fullstring, splitchar)  -- 用来处理topic返回数据的function  
+   start_with = 1    
+   split_index = 1    
+   res = {}    
+  
+   flag = true  
+   repeat  
+     end_with = string.find(fullstring, splitchar, start_with)    
+     if end_with then    
+       len = end_with - 1  
+       res[split_index] = string.sub(fullstring, start_with, len)    
+       start_with = end_with + string.len(splitchar)    
+       split_index = split_index+1    
+     else    
+       len = string.len(fullstring)  
+       res[split_index] = string.sub(fullstring, start_with, len)    
+       flag = false  
+     end  
+   until (flag==false)  
+     
+   return res   
+end  
+  
+function readdata() --采集当前最新的温湿度数据  
+  
+  tmr.create():alarm(1500,tmr.ALARM_SINGLE,function()  
+  
+    dpin = 4 --接口index  
+    status, temp, humi, temp_dec, humi_dec = dht.read11(dpin)  
+    if status == dht.OK then  
+      
+       --编写符合上报格式的数据  
+       format_data = string.format("{\"%s\":{\"%s\":%d,\"%s\":%d}}",  
+            "reported","temperature",math.floor(temp), "humidity", math.floor(humi))  
+       data.DATA2 = format_data  
+  
+    elseif status == dht.ERROR_CHECKSUM then  
+       print( "DHT Checksum error." )  
+    elseif status == dht.ERROR_TIMEOUT then  
+       print( "DHT timed out." )  
+    end  
+ end)  
+end  
+  
+-- Define WiFi station event callbacks   
+wifi_connect_event = function(T)   
+  print("Connection to "..T.SSID.." established!")  
+  disconnect_num = 0 
+end  
+  
+wifi_got_ip_event = function(T)   
+       
+  print("Wifi connection is ready! IP: "..T.IP)  
+  print("Waiting for updating data...")   
+  tmr.create():alarm(3000, tmr.ALARM_SINGLE, startup)  
+end  
+  
+local disconnect_num = 0  
+wifi_disconnect_event = function(T)  
+  
+  if T.reason == wifi.eventmon.reason.ASSOC_LEAVE then   
+    return   
+  end  
+   
+  --如果没有connected，就不停re-connected wifi  
+  total_tries = 30  
+  print("\nWiFi connection to "..T.SSID.." has failed!")  
+  
+  disconnect_num  = disconnect_num  + 1   
+  if disconnect_num  < total_tries then   
+    print("Retrying...(attempt "..(disconnect_ct+1).." of "..total_tries..")")  
+  else  
+    wifi.sta.disconnect()  
+    print("Failed for 30 times. Check your WiFi environment!")  
+    disconnect_num  = 0  
+  end  
+end  
+  
+-- 将我们自定义的wifi callback functions分配给对应的wifi event  
+wifi.eventmon.register(wifi.eventmon.STA_CONNECTED, wifi_connect_event)  
+wifi.eventmon.register(wifi.eventmon.STA_GOT_IP, wifi_got_ip_event)  
+wifi.eventmon.register(wifi.eventmon.STA_DISCONNECTED, wifi_disconnect_event)  
+  
+-- 第一步，连接wifi  
+print("Now connecting to WiFi...")  
+wifi.setmode(wifi.STATION)  
+wifi.sta.config({ssid=config.WIFI_SSID, pwd=config.WIFI_PASSWD, save=true}) 
